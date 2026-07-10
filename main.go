@@ -6,6 +6,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"encoding/json"
+	"net/http"
+	"time"
 )
 
 // 1. THE MODEL (Application State)
@@ -14,16 +18,23 @@ type model struct {
 	cursor int      // Which index in the notes list is currently selected
 }
 
+type notesMsg []string
+
 func initialModel() model {
 	return model{
-		notes:  []string{"Buy groceries", "Finish Go API project", "Learn Bubble Tea TUI", "Read documentation"},
+		notes: []string{
+			"Buy groceries",
+			"Finish Go API project",
+			"Learn Bubble Tea TUI",
+			"Read documentation",
+		},
 		cursor: 0,
 	}
 }
 
 // Init is called when the app starts. It can return an initial background command.
 func (m model) Init() tea.Cmd {
-	return nil // No background commands needed yet
+	return fetchNotesCmd
 }
 
 // 2. THE UPDATE FUNCTION (Event Handler)
@@ -40,17 +51,23 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 
 		// Move cursor up
-		case "up", "k":
+		case "up", "k", "w":
 			if m.cursor > 0 {
 				m.cursor--
 			}
 
 		// Move cursor down
-		case "down", "j":
+		case "down", "j", "s":
 			if m.cursor < len(m.notes)-1 {
 				m.cursor++
 			}
 		}
+	case notesMsg:
+		m.notes = msg // Swaps the hardcoded notes out for the background data!
+		return m, nil
+	case errMsg:
+		m.notes = []string{"Error: Could not connect to API server.", msg.Error()}
+		return m, nil
 	}
 
 	// Return the updated model back to the runtime loop
@@ -85,8 +102,32 @@ func (m model) View() string {
 	return s
 }
 
+// A custom message type to pass network errors to our Update loop safely
+type errMsg error
+
+func fetchNotesCmd() tea.Msg {
+	// Create an HTTP client with a built-in timeout safeguard
+	client := &http.Client{Timeout: 10 * time.Second}
+
+	// 1. Target your running Go/Python API endpoint (adjust port if needed!)
+	resp, err := client.Get("http://127.0.0.1:8002/notes")
+	if err != nil {
+		return errMsg(err)
+	}
+	defer resp.Body.Close()
+
+	// 2. Decode the incoming live JSON array into a slice of strings
+	var liveNotes []string
+	if err := json.NewDecoder(resp.Body).Decode(&liveNotes); err != nil {
+		return errMsg(err)
+	}
+
+	// 3. Hand the data directly back to Bubble Tea's engine
+	return notesMsg(liveNotes)
+}
+
 func main() {
-	p := tea.NewProgram(initialModel())
+	p := tea.NewProgram(initialModel(), tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Printf("Alas, there's been an error: %v", err)
 		os.Exit(1)
