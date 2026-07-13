@@ -1,129 +1,264 @@
 package main
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
+	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-
-	"encoding/json"
-	"net/http"
-	"time"
 )
 
-// 1. THE MODEL (Application State)
-type model struct {
-	notes  []string // Hardcoded list of note titles for testing
-	cursor int      // Which index in the notes list is currently selected
+// Define our explicit view states
+type viewState int
+
+const (
+	loginView viewState = iota
+	listView
+)
+
+// --- DATA MODELS ---
+
+// Note represents the schema of a note resource from the API
+type Note struct {
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Content     string `json:"content"`
+	IsCompleted bool   `json:"is_completed"`
+	UserID      int    `json:"user_id"`
 }
 
-type notesMsg []string
+// TokenResponse represents the payload received upon successful login
+type TokenResponse struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+}
+
+// --- APPLICATION STATE ---
+type model struct {
+	currentView viewState
+	token       string
+	notes       []Note
+	cursor      int
+	err         error // Added to track and display network/parsing errors
+
+	// Form Inputs
+	usernameInput textinput.Model
+	passwordInput textinput.Model
+}
+
+// Custom message types for our async flow
+type notesMsg []Note
+type authMsg string
+type errMsg error
 
 func initialModel() model {
+	u := textinput.New()
+	u.Placeholder = "Username"
+	u.Focus()
+
+	p := textinput.New()
+	p.Placeholder = "Password"
+	p.EchoMode = textinput.EchoPassword
+
 	return model{
-		notes: []string{
-			"Buy groceries",
-			"Finish Go API project",
-			"Learn Bubble Tea TUI",
-			"Read documentation",
-		},
-		cursor: 0,
+		currentView:   loginView,
+		usernameInput: u,
+		passwordInput: p,
+		notes:         []Note{},
+		cursor:        0,
 	}
 }
 
-// Init is called when the app starts. It can return an initial background command.
 func (m model) Init() tea.Cmd {
-	return fetchNotesCmd
+	return textinput.Blink
 }
 
-// 2. THE UPDATE FUNCTION (Event Handler)
-// It takes an incoming message (keypress, API response, etc.) and returns a new model
+// --- UPDATE (Event Handler) ---
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
-	switch msg := msg.(type) {
+	var cmd tea.Cmd
 
-	// Handle keypress events
+	switch msg := msg.(type) {
 	case tea.KeyMsg:
 		switch msg.String() {
-
-		// Quit the application
 		case "ctrl+c", "q":
 			return m, tea.Quit
 
-		// Move cursor up
-		case "up", "k", "w":
-			if m.cursor > 0 {
-				m.cursor--
+		case "tab":
+			if m.usernameInput.Focused() {
+				m.usernameInput.Blur()
+				m.passwordInput.Focus()
+			} else {
+				m.passwordInput.Blur()
+				m.usernameInput.Focus()
+			}
+			return m, nil
+
+		case "enter":
+			if m.currentView == loginView {
+				// Clear any previous errors and fire auth command
+				m.err = nil
+				return m, loginUserCmd(m.usernameInput.Value(), m.passwordInput.Value())
 			}
 
-		// Move cursor down
+		case "up", "k", "w":
+			if m.currentView == listView && m.cursor > 0 {
+				m.cursor--
+			}
 		case "down", "j", "s":
-			if m.cursor < len(m.notes)-1 {
+			if m.currentView == listView && m.cursor < len(m.notes)-1 {
 				m.cursor++
 			}
 		}
+
+	// Catch successful login token
+	case authMsg:
+		m.token = string(msg)
+		m.currentView = listView
+		return m, fetchNotesCmd(m.token)
+
+	// Catch successful notes data load
 	case notesMsg:
-		m.notes = msg // Swaps the hardcoded notes out for the background data!
+		m.notes = msg
 		return m, nil
+
+	// Catch network or parsing errors gracefully
 	case errMsg:
-		m.notes = []string{"Error: Could not connect to API server.", msg.Error()}
+		m.err = msg
 		return m, nil
 	}
 
-	// Return the updated model back to the runtime loop
-	return m, nil
+	// Keep typing animations fluid in the inputs
+	if m.currentView == loginView {
+		if m.usernameInput.Focused() {
+			m.usernameInput, cmd = m.usernameInput.Update(msg)
+		} else {
+			m.passwordInput, cmd = m.passwordInput.Update(msg)
+		}
+	}
+
+	return m, cmd
 }
 
-// 3. THE VIEW FUNCTION (The Painter)
-// Reads the current state from the model and translates it into a plain text string
+// --- VIEW (The Painter) ---
 func (m model) View() string {
-	// Let's create a title with a bit of styling using Lipgloss
-	titleStyle := lipgloss.NewStyle().
-		Foreground(lipgloss.Color("#01FF70")). // Lime green color
-		Bold(true).
-		Padding(0, 1)
-
-	s := titleStyle.Render("=== MY NOTES TUI ===") + "\n\n"
-	s += "Use up/down arrows or j/k to navigate. Press 'q' to quit.\n\n"
-
-	// Iterate through our data loop (exactly like React's map or PHP's while loop!)
-	for i, note := range m.notes {
-		// Calculate what the cursor looks like
-		cursorStr := "  " // default blank padding
-		if m.cursor == i {
-			cursorStr = "> " // indicate selection
-		}
-
-		// Append the line to our final display string
-		s += fmt.Sprintf("%s%s\n", cursorStr, note)
+	// Global error rendering
+	if m.err != nil {
+		return fmt.Sprintf("\n  System Error: %v\n  Press 'q' or 'ctrl+c' to quit.\n", m.err)
 	}
 
-	// The text string returned here is exactly what gets drawn to the terminal screen
+	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#01FF70")).Bold(true).Padding(0, 1)
+	s := titleStyle.Render("=== SECURE NOTES ENGINE ===") + "\n\n"
+
+	switch m.currentView {
+	case loginView:
+		s += "Please Authenticate to access your database:\n\n"
+		s += fmt.Sprintf(" %s\n\n", m.usernameInput.View())
+		s += fmt.Sprintf(" %s\n\n", m.passwordInput.View())
+		s += "Press [Tab] to switch fields • [Enter] to login • [Ctrl+C] to exit"
+
+	case listView:
+		s += "Authorized Session Token Active\n"
+		s += "Use W/S or J/K to navigate notes. Press 'q' to quit.\n\n"
+
+		if len(m.notes) == 0 {
+			s += "  Loading notes or no notes found...\n"
+		}
+
+		for i, note := range m.notes {
+			cursorStr := "  "
+			if m.cursor == i {
+				cursorStr = "> "
+			}
+
+			// Format the boolean state into a visual checkbox
+			status := "[ ]"
+			if note.IsCompleted {
+				status = "[x]"
+			}
+
+			s += fmt.Sprintf("%s %s %s (ID: %d)\n", cursorStr, status, note.Title, note.ID)
+		}
+	}
+
 	return s
 }
 
-// A custom message type to pass network errors to our Update loop safely
-type errMsg error
+// --- COMMANDS (Async Workers) ---
 
-func fetchNotesCmd() tea.Msg {
-	// Create an HTTP client with a built-in timeout safeguard
-	client := &http.Client{Timeout: 10 * time.Second}
+// loginUserCmd executes a real HTTP POST to your PHP API
+func loginUserCmd(username, password string) tea.Cmd {
+	return func() tea.Msg {
+		// Prepare the JSON payload mapped to your PHP requirements
+		payload := map[string]string{
+			"username": username,
+			"password": password,
+		}
+		jsonPayload, _ := json.Marshal(payload)
 
-	// 1. Target your running Go/Python API endpoint (adjust port if needed!)
-	resp, err := client.Get("http://127.0.0.1:8002/notes")
-	if err != nil {
-		return errMsg(err)
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("POST", "http://127.0.0.1:8002/login", bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			return errMsg(err)
+		}
+
+		// PHP expects the raw input to be read, so we must set the content type
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
+			return errMsg(fmt.Errorf("authentication failed with status: %d", resp.StatusCode))
+		}
+
+		// Decode the valid JWT response
+		var tokenResp TokenResponse
+		if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+			return errMsg(err)
+		}
+
+		return authMsg(tokenResp.AccessToken)
 	}
-	defer resp.Body.Close()
+}
 
-	// 2. Decode the incoming live JSON array into a slice of strings
-	var liveNotes []string
-	if err := json.NewDecoder(resp.Body).Decode(&liveNotes); err != nil {
-		return errMsg(err)
+// fetchNotesCmd executes a secured HTTP GET to fetch the user's notes
+func fetchNotesCmd(token string) tea.Cmd {
+	return func() tea.Msg {
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("GET", "http://127.0.0.1:8002/notes", nil)
+		if err != nil {
+			return errMsg(err)
+		}
+
+		// Attach the JWT extracted from the login phase
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errMsg(fmt.Errorf("failed to fetch notes with status: %d", resp.StatusCode))
+		}
+
+		// Decode the raw array of JSON objects directly into the slice
+		var notes []Note
+		if err := json.NewDecoder(resp.Body).Decode(&notes); err != nil {
+			return errMsg(err)
+		}
+
+		return notesMsg(notes)
 	}
-
-	// 3. Hand the data directly back to Bubble Tea's engine
-	return notesMsg(liveNotes)
 }
 
 func main() {
