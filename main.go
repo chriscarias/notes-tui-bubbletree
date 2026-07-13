@@ -13,12 +13,17 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// Define the target API base URL here to easily swap between PHP, Go, and Python
+var baseURL = "http://127.0.0.1:8002"
+
 // Define our explicit view states
 type viewState int
 
 const (
 	loginView viewState = iota
 	listView
+	createView
+	deleteView
 )
 
 // --- DATA MODELS ---
@@ -49,12 +54,19 @@ type model struct {
 	// Form Inputs
 	usernameInput textinput.Model
 	passwordInput textinput.Model
+
+	// Create Note
+	noteTitleInput   textinput.Model
+	noteContentInput textinput.Model
 }
 
 // Custom message types for our async flow
 type notesMsg []Note
 type authMsg string
 type errMsg error
+type noteCreatedMsg struct{}
+type noteUpdatedMsg struct{}
+type noteDeletedMsg struct{}
 
 func initialModel() model {
 	u := textinput.New()
@@ -65,12 +77,22 @@ func initialModel() model {
 	p.Placeholder = "Password"
 	p.EchoMode = textinput.EchoPassword
 
+	// Setup Note Title Input
+	nt := textinput.New()
+	nt.Placeholder = "Note Title"
+
+	// Setup Note Content Input
+	nc := textinput.New()
+	nc.Placeholder = "Note Content"
+
 	return model{
-		currentView:   loginView,
-		usernameInput: u,
-		passwordInput: p,
-		notes:         []Note{},
-		cursor:        0,
+		currentView:      loginView,
+		usernameInput:    u,
+		passwordInput:    p,
+		notes:            []Note{},
+		noteTitleInput:   nt,
+		noteContentInput: nc,
+		cursor:           0,
 	}
 }
 
@@ -83,26 +105,68 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+
 	case tea.KeyMsg:
 		switch msg.String() {
-		case "ctrl+c", "q":
+		case "ctrl+c":
 			return m, tea.Quit
-
-		case "tab":
-			if m.usernameInput.Focused() {
-				m.usernameInput.Blur()
-				m.passwordInput.Focus()
-			} else {
-				m.passwordInput.Blur()
-				m.usernameInput.Focus()
+		case "q":
+			// Only allow 'q' to quit if we are in the list view or an error screen
+			if m.currentView == listView || m.err != nil {
+				return m, tea.Quit
 			}
-			return m, nil
+			// If we are typing in loginView or createView, we do nothing here,
+			// allowing the 'q' to fall through to the text input updates below
 
 		case "enter":
 			if m.currentView == loginView {
 				// Clear any previous errors and fire auth command
 				m.err = nil
 				return m, loginUserCmd(m.usernameInput.Value(), m.passwordInput.Value())
+			} else if m.currentView == createView {
+				// Don't submit if the title is empty
+				if m.noteTitleInput.Value() == "" {
+					return m, nil
+				}
+
+				m.err = nil
+				// Fire the creation command with title, content, and the session token
+				return m, createNoteCmd(m.noteTitleInput.Value(), m.noteContentInput.Value(), m.token)
+			}
+
+		case " ":
+			if m.currentView == listView && len(m.notes) > 0 {
+				selectedNote := m.notes[m.cursor]
+				m.err = nil // Clear any lingering errors
+				return m, toggleNoteCmd(selectedNote.ID, selectedNote.IsCompleted, m.token)
+			}
+
+		// Trigger the delete confirmation view
+		case "d":
+			if m.currentView == listView && len(m.notes) > 0 {
+				m.currentView = deleteView
+				return m, nil
+			}
+
+		// Confirm deletion
+		case "y":
+			if m.currentView == deleteView {
+				selectedNote := m.notes[m.cursor]
+				m.err = nil
+				return m, deleteNoteCmd(selectedNote.ID, m.token)
+			}
+
+		// Cancel deletion (explicit 'n' key)
+		case "n":
+			if m.currentView == deleteView {
+				m.currentView = listView
+				return m, nil
+			}
+			// Let it fall through if we are in createView so 'n' can be typed!
+			if m.currentView == listView {
+				m.currentView = createView
+				m.noteTitleInput.Focus()
+				return m, nil
 			}
 
 		case "up", "k", "w":
@@ -112,6 +176,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "down", "j", "s":
 			if m.currentView == listView && m.cursor < len(m.notes)-1 {
 				m.cursor++
+			}
+		// Add "esc" to act as a cancel/back button
+		case "esc":
+			// If there's an error, clear it and stop processing so the user can retry
+			if m.err != nil {
+				m.err = nil
+				return m, nil
+			}
+
+			// Otherwise, handle normal view cancellation
+			if m.currentView == createView || m.currentView == deleteView {
+				m.currentView = listView
+				m.noteTitleInput.SetValue("")
+				m.noteContentInput.SetValue("")
+			}
+
+		// Modify the "tab" case to handle both forms
+		case "tab":
+			if m.currentView == loginView {
+				if m.usernameInput.Focused() {
+					m.usernameInput.Blur()
+					m.passwordInput.Focus()
+				} else {
+					m.passwordInput.Blur()
+					m.usernameInput.Focus()
+				}
+			} else if m.currentView == createView {
+				if m.noteTitleInput.Focused() {
+					m.noteTitleInput.Blur()
+					m.noteContentInput.Focus()
+				} else {
+					m.noteContentInput.Blur()
+					m.noteTitleInput.Focus()
+				}
 			}
 		}
 
@@ -130,14 +228,41 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case errMsg:
 		m.err = msg
 		return m, nil
+
+	// Catch successful note creation
+	case noteCreatedMsg:
+		m.noteTitleInput.SetValue("")
+		m.noteContentInput.SetValue("")
+		m.currentView = listView
+		return m, fetchNotesCmd(m.token)
+
+	case noteUpdatedMsg:
+		// Fetch the updated list from the server so the checkbox updates visually
+		return m, fetchNotesCmd(m.token)
+
+	// Catch successful note deletion
+	case noteDeletedMsg:
+		m.currentView = listView
+		// Disarm the out-of-bounds trap!
+		if m.cursor > 0 && m.cursor == len(m.notes)-1 {
+			m.cursor--
+		}
+		return m, fetchNotesCmd(m.token)
+
 	}
 
-	// Keep typing animations fluid in the inputs
+	// Keep typing animations fluid in the active inputs
 	if m.currentView == loginView {
 		if m.usernameInput.Focused() {
 			m.usernameInput, cmd = m.usernameInput.Update(msg)
 		} else {
 			m.passwordInput, cmd = m.passwordInput.Update(msg)
+		}
+	} else if m.currentView == createView {
+		if m.noteTitleInput.Focused() {
+			m.noteTitleInput, cmd = m.noteTitleInput.Update(msg)
+		} else {
+			m.noteContentInput, cmd = m.noteContentInput.Update(msg)
 		}
 	}
 
@@ -148,22 +273,22 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m model) View() string {
 	// Global error rendering
 	if m.err != nil {
-		return fmt.Sprintf("\n  System Error: %v\n  Press 'q' or 'ctrl+c' to quit.\n", m.err)
+		return fmt.Sprintf("\n  System Error: %v\n  Press 'q' or 'ctrl+c' to quit or 'Esc' to retry.\n", m.err)
 	}
 
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#01FF70")).Bold(true).Padding(0, 1)
-	s := titleStyle.Render("=== SECURE NOTES ENGINE ===") + "\n\n"
+	s := titleStyle.Render("=== POLYGLOT NOTES TUI ===") + "\n\n"
 
 	switch m.currentView {
 	case loginView:
 		s += "Please Authenticate to access your database:\n\n"
 		s += fmt.Sprintf(" %s\n\n", m.usernameInput.View())
 		s += fmt.Sprintf(" %s\n\n", m.passwordInput.View())
-		s += "Press [Tab] to switch fields • [Enter] to login • [Ctrl+C] to exit"
+		s += "Press [Tab] to switch fields • [Enter] to login • [Ctrl+C] or 'q' to exit"
 
 	case listView:
 		s += "Authorized Session Token Active\n"
-		s += "Use W/S or J/K to navigate notes. Press 'q' to quit.\n\n"
+		s += "Use Up/Down or W/S or J/K to navigate notes. Press 'n' to create a new note. Press 'd' to delete a note. \nPress 'q' or 'ctrl+c' to quit.\n\n"
 
 		if len(m.notes) == 0 {
 			s += "  Loading notes or no notes found...\n"
@@ -183,6 +308,22 @@ func (m model) View() string {
 
 			s += fmt.Sprintf("%s %s %s (ID: %d)\n", cursorStr, status, note.Title, note.ID)
 		}
+	case createView:
+		s += "--- Create a New Note ---\n\n"
+		s += fmt.Sprintf(" %s\n\n", m.noteTitleInput.View())
+		s += fmt.Sprintf(" %s\n\n", m.noteContentInput.View())
+		s += "Press [Tab] to switch fields • [Enter] to save • [Esc] to cancel"
+
+	case deleteView:
+		// Target the exact note we are threatening to delete
+		selectedNote := m.notes[m.cursor]
+
+		warningStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4136")).Bold(true)
+		s += warningStyle.Render("!!! WARNING: PERMANENT DELETION !!!") + "\n\n"
+
+		s += fmt.Sprintf("Are you sure you want to cast Obliterate on the note: '%s'?\n\n", selectedNote.Title)
+		s += "Press 'y' to confirm • 'n' or [Esc] to cancel"
+
 	}
 
 	return s
@@ -201,7 +342,7 @@ func loginUserCmd(username, password string) tea.Cmd {
 		jsonPayload, _ := json.Marshal(payload)
 
 		client := &http.Client{Timeout: 5 * time.Second}
-		req, err := http.NewRequest("POST", "http://127.0.0.1:8002/login", bytes.NewBuffer(jsonPayload))
+		req, err := http.NewRequest("POST", baseURL+"/login", bytes.NewBuffer(jsonPayload))
 		if err != nil {
 			return errMsg(err)
 		}
@@ -233,7 +374,7 @@ func loginUserCmd(username, password string) tea.Cmd {
 func fetchNotesCmd(token string) tea.Cmd {
 	return func() tea.Msg {
 		client := &http.Client{Timeout: 5 * time.Second}
-		req, err := http.NewRequest("GET", "http://127.0.0.1:8002/notes", nil)
+		req, err := http.NewRequest("GET", baseURL+"/notes", nil)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -258,6 +399,98 @@ func fetchNotesCmd(token string) tea.Cmd {
 		}
 
 		return notesMsg(notes)
+	}
+}
+
+// createNoteCmd executes a POST request to save a new note
+func createNoteCmd(title, content, token string) tea.Cmd {
+	return func() tea.Msg {
+		payload := map[string]interface{}{
+			"title":   title,
+			"content": content,
+		}
+		jsonPayload, _ := json.Marshal(payload)
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		req, err := http.NewRequest("POST", baseURL+"/notes", bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			return errMsg(err)
+		}
+
+		// Set headers: JSON content type and the Bearer token for authentication
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer resp.Body.Close()
+
+		// Your PHP API returns 201 Created on success
+		if resp.StatusCode != http.StatusCreated {
+			return errMsg(fmt.Errorf("failed to create note with status: %d", resp.StatusCode))
+		}
+
+		return noteCreatedMsg{}
+	}
+}
+
+// toggleNoteCmd executes a PATCH request to flip the completion status
+func toggleNoteCmd(noteID int, currentStatus bool, token string) tea.Cmd {
+	return func() tea.Msg {
+		payload := map[string]interface{}{
+			"is_completed": !currentStatus,
+		}
+		jsonPayload, _ := json.Marshal(payload)
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		url := fmt.Sprintf("%s/notes/%d", baseURL, noteID)
+		req, err := http.NewRequest("PATCH", url, bytes.NewBuffer(jsonPayload))
+		if err != nil {
+			return errMsg(err)
+		}
+
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errMsg(fmt.Errorf("failed to update note with status: %d", resp.StatusCode))
+		}
+
+		return noteUpdatedMsg{}
+	}
+}
+
+// deleteNoteCmd executes a DELETE request to remove a note permanently
+func deleteNoteCmd(noteID int, token string) tea.Cmd {
+	return func() tea.Msg {
+		client := &http.Client{Timeout: 5 * time.Second}
+		url := fmt.Sprintf("%s/notes/%d", baseURL, noteID)
+		req, err := http.NewRequest("DELETE", url, nil)
+		if err != nil {
+			return errMsg(err)
+		}
+
+		req.Header.Set("Authorization", "Bearer "+token)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			return errMsg(err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			return errMsg(fmt.Errorf("failed to delete note with status: %d", resp.StatusCode))
+		}
+
+		return noteDeletedMsg{}
 	}
 }
 
