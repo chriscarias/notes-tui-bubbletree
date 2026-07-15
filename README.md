@@ -41,7 +41,7 @@ notes-tui-bubbletea/
 ## ⚙️ Compilation & Setup
 1. Clone the repository and enter the directory:
 ```Bash
-cd ~/apis/notes-tui-bubbletea
+cd notes-tui-bubbletea
 ```
 2. Initialize modules and fetch dependencies:
 ```Bash
@@ -51,7 +51,10 @@ go mod tidy
 ```Go
 const BaseURL = "http://127.0.0.1:8002"
 ```
-4. Run the TUI Client:Bashgo run main.go
+4. Run the TUI Client:
+```Bash
+go run main.go
+```
 5. Build the optimized binary:
 ```Bash
 go build -o notes-tui
