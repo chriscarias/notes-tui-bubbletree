@@ -1,0 +1,10 @@
+# Ignore local environment keys file
+.env
+
+# Ignore compiled binary executables (Go compiles down to a single binary file)
+notes-tui-bubbletea
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
