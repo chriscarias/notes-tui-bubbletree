@@ -63,15 +63,15 @@ go build -o notes-tui
 
 ## ⌨️ Keyboard Mapping Controls
 Key Action
-j / ↓   Move down the list
-k / ↑   Move up the list
-tab     Toggle focus between Notes List and the Editor pane
-n       Create a clean new note workspace
-s       Save (Create or Patch update) the selected note
-d       Trigger note deletion (awaits verification key)
-c       Quick toggle completion state on selected note
-esc     Back out of editor mode / clear current action
-ctrl+c  Exit application safely
+- j / ↓   Move down the list
+- k / ↑   Move up the list
+- tab     Toggle focus between Notes List and the Editor pane
+- n       Create a clean new note workspace
+- s       Save (Create or Patch update) the selected note
+- d       Trigger note deletion (awaits verification key)
+- c       Quick toggle completion state on selected note
+- esc     Back out of editor mode / clear current action
+- ctrl+c  Exit application safely
 
 ## 🌐 API Interaction Protocol
 The Go TUI communicates with the database backend via standard REST interfaces:
