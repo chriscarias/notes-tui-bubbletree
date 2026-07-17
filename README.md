@@ -1,4 +1,5 @@
 # Notes API Client (Bubble Tea TUI)
+## Frontend for Polyglot Notes Project
 
 A terminal-native, keyboard-driven text user interface (TUI) built in **Go** using the **Charm Bubble Tea** framework. This client communicates with the same Notes REST API backend as its Tkinter desktop counterpart, allowing you to manage your personal notes database directly from your command-line environment.
 
